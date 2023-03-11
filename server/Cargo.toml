@@ -1,0 +1,13 @@
+[package]
+name = "chat_app_server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-ringbuf = "0.1.2"
+audiopus = { version = "0.2.0", features = ["default_features"] }
+console-subscriber = "0.1.8"
+rstreamer = { version = "0.1.0", path = "../rstreamer" }
+tokio = { version = "1.26.0", features = ["full", "tracing"] }
