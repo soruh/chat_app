@@ -1,14 +1,14 @@
 [package]
-name = "chat_app_server"
+name = "rstreamer"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-ringbuf = "0.1.2"
-audiopus = { version = "0.2.0", features = ["default_features"] }
+async-ringbuf = { version = "0.1.2", features = ["impl-tokio"] }
 console-subscriber = "0.1.8"
-protocol = { version = "0.1.0", path = "../protocol" }
-rstreamer = { version = "0.1.0", path = "../rstreamer" }
+futures = "0.3.27"
+rand = "0.8.5"
+ringbuf = "0.3.2"
 tokio = { version = "1.26.0", features = ["full", "tracing"] }

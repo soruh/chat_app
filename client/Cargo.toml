@@ -1,0 +1,19 @@
+[package]
+name = "chat_app_client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.66"
+audiopus = { version = "0.2.0", features = ["default_features", "multistream", "repacketizer"] }
+cpal = { version = "0.15.0", features = ["jack"] }
+ringbuf = "0.3.2"
+clap = { version = "3.1", default-features = false, features = ["std"] }
+rand = "0.8.5"
+audiopus_sys = { version = "*", features = ["static"] }
+
+[patch.crates-io]
+audiopus_sys = { git = "https://github.com/WcaleNieWolny/audiopus_sys.git", branch = "stable-changes" }
+
