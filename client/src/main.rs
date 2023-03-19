@@ -8,7 +8,12 @@ use std::{
 use anyhow::Context;
 use clap::arg;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use iced::{Application, Settings};
 use ringbuf::HeapRb;
+
+use crate::gui::Gui;
+
+mod gui;
 
 const PORT: u16 = 8594;
 
@@ -66,7 +71,11 @@ impl Opt {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+    Gui::run(Settings::default()).unwrap();
+}
+
+fn _main() -> anyhow::Result<()> {
     let opt = Opt::from_args()?;
 
     #[cfg(target_os = "linux")]

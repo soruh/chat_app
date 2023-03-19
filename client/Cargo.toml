@@ -13,6 +13,9 @@ ringbuf = "0.3.2"
 clap = { version = "3.1", default-features = false, features = ["std"] }
 rand = "0.8.5"
 audiopus_sys = { version = "*", features = ["static"] }
+iced = { version = "0.8.0", features = ["tokio"] }
+tokio = { version = "1.26.0", features = ["full"] }
+
 
 [patch.crates-io]
 audiopus_sys = { git = "https://github.com/WcaleNieWolny/audiopus_sys.git", branch = "stable-changes" }
