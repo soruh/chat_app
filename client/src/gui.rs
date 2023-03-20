@@ -5,15 +5,21 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, HostId};
 use iced::futures::stream::BoxStream;
-use iced::widget::{button, column, pick_list, row, text};
+use iced::futures::StreamExt;
+use iced::widget::{button, column, pick_list, row, text, text_input};
 use iced::{Alignment, Application, Command, Element, Subscription};
 
+use protocol::greeter_client::GreeterClient;
+use protocol::{GetHelloUpdatesRequest, HelloReply, HelloRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct Gui {
     value: i32,
     receiver: Cell<Option<UnboundedReceiver<Message>>>,
     audio: AudioConfig,
+    name: String,
+    your_greeting: String,
+    latest_greeting: String,
 }
 
 struct AudioConfig {
@@ -42,6 +48,10 @@ pub enum Message {
     SelectHost(Host),
     SelectInput(String),
     SelectOutput(String),
+    SayHello,
+    HelloResponse(HelloReply),
+    SetName(String),
+    UpdatesLatestGreeting(String),
 }
 
 impl Application for Gui {
@@ -53,10 +63,31 @@ impl Application for Gui {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
+        {
+            let sender = sender.clone();
+            tokio::task::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    sender.send(Message::DecrementPressed).unwrap();
+                }
+            });
+        }
+
         tokio::task::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                sender.send(Message::DecrementPressed).unwrap();
+            let mut client = GreeterClient::connect("http://h.glsys.de:8594")
+                .await
+                .unwrap();
+
+            let mut updates = client
+                .get_hello_updates(GetHelloUpdatesRequest {})
+                .await
+                .unwrap()
+                .into_inner();
+
+            while let Some(update) = updates.next().await {
+                sender
+                    .send(Message::UpdatesLatestGreeting(update.unwrap().message))
+                    .unwrap();
             }
         });
 
@@ -92,6 +123,9 @@ impl Application for Gui {
                     output_device,
                     host,
                 },
+                your_greeting: String::new(),
+                name: String::new(),
+                latest_greeting: String::new(),
             },
             Command::none(),
         )
@@ -146,6 +180,26 @@ impl Application for Gui {
                     .unwrap()
                     .find(|device| device.name().unwrap() == name)
             }
+            Message::SayHello => {
+                let name = self.name.clone();
+                let value = self.value;
+                return Command::perform(
+                    async move {
+                        let mut client = GreeterClient::connect("http://h.glsys.de:8594")
+                            .await
+                            .unwrap();
+
+                        client
+                            .say_hello(HelloRequest { name, value })
+                            .await
+                            .unwrap()
+                    },
+                    |response| Message::HelloResponse(response.into_inner()),
+                );
+            }
+            Message::HelloResponse(reply) => self.your_greeting = reply.message,
+            Message::SetName(name) => self.name = name,
+            Message::UpdatesLatestGreeting(greeting) => self.latest_greeting = greeting,
         }
 
         Command::none()
@@ -153,34 +207,44 @@ impl Application for Gui {
 
     fn view(&self) -> Element<Message> {
         let audio = &self.audio;
-        row![
-            column![
-                button("Increment").on_press(Message::IncrementPressed),
-                text(self.value).size(50),
-                button("Decrement").on_press(Message::DecrementPressed)
+        column![
+            row![
+                text_input("name", &self.name, Message::SetName),
+                button("say hello").on_press(Message::SayHello),
+            ],
+            row![
+                column![
+                    button("Increment").on_press(Message::IncrementPressed),
+                    text(self.value).size(50),
+                    button("Decrement").on_press(Message::DecrementPressed)
+                ]
+                .padding(20)
+                .align_items(Alignment::Center),
+                column![
+                    pick_list(&audio.hosts, Some(audio.host_id), Message::SelectHost),
+                    pick_list(
+                        &audio.input_devices,
+                        audio
+                            .input_device
+                            .as_ref()
+                            .map(|device| device.name().unwrap()),
+                        Message::SelectInput
+                    ),
+                    pick_list(
+                        &audio.output_devices,
+                        audio
+                            .output_device
+                            .as_ref()
+                            .map(|device| device.name().unwrap()),
+                        Message::SelectOutput
+                    ),
+                ]
+                .padding(20),
+                column![
+                    text(format!("your greeting: {}", self.your_greeting)),
+                    text(format!("latest greeting: {}", self.latest_greeting))
+                ]
             ]
-            .padding(20)
-            .align_items(Alignment::Center),
-            column![
-                pick_list(&audio.hosts, Some(audio.host_id), Message::SelectHost),
-                pick_list(
-                    &audio.input_devices,
-                    audio
-                        .input_device
-                        .as_ref()
-                        .map(|device| device.name().unwrap()),
-                    Message::SelectInput
-                ),
-                pick_list(
-                    &audio.output_devices,
-                    audio
-                        .output_device
-                        .as_ref()
-                        .map(|device| device.name().unwrap()),
-                    Message::SelectOutput
-                ),
-            ]
-            .padding(20),
         ]
         .into()
     }

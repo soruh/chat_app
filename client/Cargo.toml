@@ -15,6 +15,7 @@ rand = "0.8.5"
 audiopus_sys = { version = "*", features = ["static"] }
 iced = { version = "0.8.0", features = ["tokio"] }
 tokio = { version = "1.26.0", features = ["full"] }
+protocol = { version = "0.1.0", path = "../protocol" }
 
 
 [patch.crates-io]

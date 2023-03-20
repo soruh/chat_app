@@ -274,8 +274,6 @@ fn _main() -> anyhow::Result<()> {
     };
 
     std::thread::spawn(move || loop {
-        return;
-
         print!(
             "\x1b[Kbuffer size: {}\r",
             buffer_fill.load(std::sync::atomic::Ordering::Relaxed)

@@ -1,204 +1,121 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+#![feature(type_alias_impl_trait)]
 
-use rstreamer::{Node, NodeHandle, NodeInfo};
-use tokio::{
-    io::AsyncReadExt,
-    net::{TcpListener, UdpSocket},
-    sync::Mutex,
-};
+use std::net::ToSocketAddrs;
+use tokio_stream::{Stream, StreamExt};
+
+use time::format_description::OwnedFormatItem;
+
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{transport::Server, Request, Response, Status};
+
+use protocol::greeter_server::{Greeter, GreeterServer};
+use protocol::{GetHelloUpdatesRequest, HelloReply, HelloRequest};
+use tracing::info;
 
 const PORT: u16 = 8594;
 
-const MS40: usize = 48000 * 40 / 1000;
+static TIME_ZONE_OFFSET: once_cell::sync::OnceCell<time::UtcOffset> =
+    once_cell::sync::OnceCell::new();
 
-#[tokio::main]
-async fn main() {
-    console_subscriber::init();
+static TIME_FORMAT: once_cell::sync::OnceCell<OwnedFormatItem> = once_cell::sync::OnceCell::new();
 
-    let tcp_listener = TcpListener::bind(("0.0.0.0", PORT)).await.unwrap();
-    let upd_socket = Arc::new(UdpSocket::bind(("0.0.0.0", PORT)).await.unwrap());
+fn setup_tracing() {
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{filter, fmt};
 
-    let mut last_id = 0u64;
+    let registry = tracing_subscriber::registry();
 
-    struct State {
-        muxers: HashMap<u64, NodeHandle<i16, i16>>,
-        sources: HashMap<u64, NodeHandle<(), i16>>,
+    let registry = registry.with(console_subscriber::spawn());
+
+    registry
+        .with(
+            fmt::layer()
+                .with_timer(fmt::time::OffsetTime::new(
+                    *TIME_ZONE_OFFSET.get().unwrap(),
+                    TIME_FORMAT.get().unwrap(),
+                ))
+                .with_filter(filter::LevelFilter::DEBUG)
+                .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                    meta.target().starts_with(env!("CARGO_CRATE_NAME"))
+                })),
+        )
+        .init();
+}
+
+fn main() -> anyhow::Result<()> {
+    TIME_FORMAT
+        .set(time::format_description::parse_owned::<2>(
+            "[hour]:[minute]:[second] [day].[month].[year]",
+        )?)
+        .unwrap();
+
+    // we need to get this while still single threaded
+    // as getting the time zone offset in a multithreaded programm
+    // is UB in some environments
+    TIME_ZONE_OFFSET
+        .set(time::UtcOffset::current_local_offset()?)
+        .unwrap();
+
+    setup_tracing();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(tokio_main())
+}
+
+#[derive(Debug)]
+pub struct MyGreeter {
+    sender: tokio::sync::broadcast::Sender<HelloReply>,
+    receiver: tokio::sync::broadcast::Receiver<HelloReply>,
+}
+
+impl MyGreeter {
+    pub fn new() -> Self {
+        let (sender, receiver) = tokio::sync::broadcast::channel(16);
+
+        Self { sender, receiver }
+    }
+}
+
+#[tonic::async_trait]
+impl Greeter for MyGreeter {
+    async fn say_hello(
+        &self,
+        request: Request<HelloRequest>,
+    ) -> Result<Response<HelloReply>, Status> {
+        let request = request.into_inner();
+
+        info!(?request, "Got a request");
+        let reply = HelloReply {
+            message: format!("Hello {}! Your number is {}.", request.name, request.value),
+        };
+
+        let _ = self.sender.send(reply.clone());
+
+        Ok(Response::new(reply))
     }
 
-    let state = Arc::new(Mutex::new(State {
-        muxers: HashMap::new(),
-        sources: HashMap::new(),
-    }));
-
-    loop {
-        let id = last_id;
-        last_id = last_id.wrapping_add(1);
-
-        let (mut tcp_socket, addr) = tcp_listener.accept().await.unwrap();
-
-        let state = state.clone();
-        let upd_socket = upd_socket.clone();
-        tokio::task::Builder::new()
-            .name(&format!("TCP connection to {addr:?}"))
-            .spawn(async move {
-                let (decoder, mut decoder_lock) = Node::<(), _>::from_task(
-                    &format!("OPUS decoder for {addr:?}"),
-                    NodeInfo {
-                        output_buffer_size: MS40,
-                        input_buffer_size: 0,
-                        input_buffer_duration: Duration::from_millis(0),
-                    },
-                    {
-                        let upd_socket = upd_socket.clone();
-                        |node| async move {
-                            let mut decoder = audiopus::coder::Decoder::new(
-                                audiopus::SampleRate::Hz48000,
-                                audiopus::Channels::Mono,
-                            )
-                            .unwrap();
-
-                            let mut input_buffer = vec![0; MS40];
-                            let mut output_buffer = vec![0; MS40];
-
-                            loop {
-                                let (_, remote_addr) =
-                                    upd_socket.peek_from(&mut input_buffer).await.unwrap();
-
-                                if remote_addr != addr {
-                                    tokio::task::yield_now().await;
-                                    continue;
-                                }
-
-                                let (n, addr) =
-                                    upd_socket.recv_from(&mut input_buffer).await.unwrap();
-
-                                let n = decoder
-                                    .decode(Some(&input_buffer[..n]), &mut output_buffer, false)
-                                    .unwrap();
-
-                                println!("decoded {n} bytes for {addr:?}");
-
-                                let node = &mut *node.lock().await;
-                                for output in node.outputs_mut() {
-                                    output.as_mut_base().push_slice(&output_buffer[..n]);
-                                }
-                            }
-                        }
-                    },
-                );
-
-                let (encoder, mut encoder_lock) = Node::<_, ()>::from_task(
-                    &format!("OPUS encoder for {addr:?}"),
-                    NodeInfo {
-                        output_buffer_size: 0,
-                        input_buffer_size: MS40,
-                        input_buffer_duration: Duration::from_millis(20),
-                    },
-                    |node| async move {
-                        let encoder = audiopus::coder::Encoder::new(
-                            audiopus::SampleRate::Hz48000,
-                            audiopus::Channels::Mono,
-                            audiopus::Application::Audio,
-                        )
-                        .unwrap();
-
-                        let mut input_buffer = vec![0; MS40]; // 20 ms
-                        let mut output_buffer = vec![0; MS40];
-
-                        loop {
-                            node.lock().await.inputs_mut()[0]
-                                .pop_slice(&mut input_buffer)
-                                .await
-                                .unwrap();
-
-                            let n = encoder.encode(&input_buffer, &mut output_buffer).unwrap();
-
-                            println!("encoded {n} bytes for {addr:?}");
-
-                            upd_socket.send_to(&output_buffer[..n], addr).await.unwrap();
-                        }
-                    },
-                );
-
-                let mut muxer_scratch_buffer = vec![0i16; MS40];
-                let mut muxer_output_buffer = vec![0i16; MS40];
-                let (muxer, mut muxer_lock) = Node::from_fn(
-                    &format!("multiplexer for {addr:?}"),
-                    NodeInfo {
-                        output_buffer_size: MS40,
-                        input_buffer_size: MS40,
-                        input_buffer_duration: Duration::from_millis(20),
-                    },
-                    move |inputs, outputs| {
-                        muxer_output_buffer.fill(0);
-
-                        let mut n_max = 0;
-                        for input in inputs {
-                            let n = input.as_mut_base().pop_slice(&mut muxer_scratch_buffer);
-
-                            n_max = n_max.max(n);
-
-                            for (src, dst) in muxer_scratch_buffer[..n]
-                                .iter()
-                                .zip(muxer_output_buffer.iter_mut())
-                            {
-                                *dst = dst.saturating_add(*src);
-                            }
-                        }
-
-                        for output in outputs {
-                            output
-                                .as_mut_base()
-                                .push_slice(&muxer_output_buffer[..n_max]);
-                        }
-                    },
-                );
-
-                {
-                    let state = &mut *state.lock().await;
-
-                    for (_id, muxer) in &mut state.muxers {
-                        let node = &mut *muxer.node.lock().await;
-
-                        decoder_lock.connect(node);
-                    }
-
-                    for (_id, client) in &mut state.sources {
-                        let mut node = client.node.lock().await;
-
-                        node.connect(&mut *muxer_lock);
-                    }
-
-                    muxer_lock.connect(&mut *encoder_lock);
-
-                    state.muxers.insert(id, muxer);
-                    state.sources.insert(id, decoder);
-                }
-
-                drop(muxer_lock);
-                drop(decoder_lock);
-                drop(encoder_lock);
-
-                println!("{addr:?} is now connected");
-
-                let mut buf = [0; 128];
-                loop {
-                    if let Err(_err) = tcp_socket.read_exact(&mut buf).await {
-                        let state = &mut *state.lock().await;
-                        state.sources.remove(&id).unwrap().handle.abort();
-                        state.muxers.remove(&id).unwrap().handle.abort();
-                        encoder.handle.abort();
-
-                        for (_id, muxer) in &mut state.muxers {
-                            muxer.node.lock().await.remove_closed_inputs();
-                        }
-
-                        println!("{addr:?} disconnected");
-
-                        break;
-                    }
-                }
-            })
-            .unwrap();
+    type GetHelloUpdatesStream = impl Stream<Item = Result<HelloReply, Status>>;
+    async fn get_hello_updates(
+        &self,
+        _request: Request<GetHelloUpdatesRequest>,
+    ) -> Result<Response<Self::GetHelloUpdatesStream>, Status> {
+        Ok(Response::new(
+            tokio_stream::wrappers::BroadcastStream::new(self.receiver.resubscribe())
+                .map(|elem| elem.map_err(|err| Status::internal(err.to_string()))),
+        ))
     }
+}
+
+async fn tokio_main() -> anyhow::Result<()> {
+    let addr = ("0.0.0.0", PORT).to_socket_addrs()?.next().unwrap();
+    let greeter = MyGreeter::new();
+
+    Server::builder()
+        .add_service(GreeterServer::new(greeter))
+        .serve(addr)
+        .await?;
+
+    Ok(())
 }
