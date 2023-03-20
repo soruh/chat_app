@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -11,7 +12,9 @@ use iced::{Alignment, Application, Command, Element, Subscription};
 
 use protocol::greeter_client::GreeterClient;
 use protocol::{GetHelloUpdatesRequest, HelloReply, HelloRequest};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::{mpsc::UnboundedReceiver, Mutex};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use tonic::Request;
 
 pub struct Gui {
     value: i32,
@@ -20,6 +23,7 @@ pub struct Gui {
     name: String,
     your_greeting: String,
     latest_greeting: String,
+    client: Arc<Mutex<GreeterClient<Channel>>>,
 }
 
 struct AudioConfig {
@@ -63,6 +67,20 @@ impl Application for Gui {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
+        let identity = Identity::from_pem(
+            include_bytes!("../../certs/client_0.crt"),
+            include_bytes!("../../certs/client_0.key"),
+        );
+
+        let ca = Certificate::from_pem(include_bytes!("../../certs/ca.crt"));
+
+        let client = Arc::new(Mutex::new(GreeterClient::new(
+            Channel::from_static("https://h.glsys.de:8594")
+                .tls_config(ClientTlsConfig::new().identity(identity).ca_certificate(ca))
+                .unwrap()
+                .connect_lazy(),
+        )));
+
         {
             let sender = sender.clone();
             tokio::task::spawn(async move {
@@ -72,24 +90,24 @@ impl Application for Gui {
                 }
             });
         }
+        {
+            let client = client.clone();
+            tokio::task::spawn(async move {
+                let mut updates = client
+                    .lock()
+                    .await
+                    .get_hello_updates(GetHelloUpdatesRequest {})
+                    .await
+                    .unwrap()
+                    .into_inner();
 
-        tokio::task::spawn(async move {
-            let mut client = GreeterClient::connect("http://h.glsys.de:8594")
-                .await
-                .unwrap();
-
-            let mut updates = client
-                .get_hello_updates(GetHelloUpdatesRequest {})
-                .await
-                .unwrap()
-                .into_inner();
-
-            while let Some(update) = updates.next().await {
-                sender
-                    .send(Message::UpdatesLatestGreeting(update.unwrap().message))
-                    .unwrap();
-            }
-        });
+                while let Some(update) = updates.next().await {
+                    sender
+                        .send(Message::UpdatesLatestGreeting(update.unwrap().message))
+                        .unwrap();
+                }
+            });
+        }
 
         let hosts: Vec<Host> = cpal::available_hosts().into_iter().map(Host).collect();
 
@@ -126,6 +144,7 @@ impl Application for Gui {
                 your_greeting: String::new(),
                 name: String::new(),
                 latest_greeting: String::new(),
+                client,
             },
             Command::none(),
         )
@@ -182,14 +201,13 @@ impl Application for Gui {
             }
             Message::SayHello => {
                 let name = self.name.clone();
+                let client = self.client.clone();
                 let value = self.value;
                 return Command::perform(
                     async move {
-                        let mut client = GreeterClient::connect("http://h.glsys.de:8594")
-                            .await
-                            .unwrap();
-
                         client
+                            .lock()
+                            .await
                             .say_hello(HelloRequest { name, value })
                             .await
                             .unwrap()

@@ -8,7 +8,19 @@ service Greeter {
   rpc SayHello(HelloRequest) returns (HelloReply) {}
 
   rpc GetHelloUpdates(GetHelloUpdatesRequest) returns (stream HelloReply) {}
+
+  rpc StartUdpSidechannelSetup(UdpSetupRequest) returns (UdpSetupResponse) {}
+  rpc FinishUdpSidechannelSetup(UdpSetupFinishRequest)
+      returns (UdpSetupFinishRespone) {}
 }
+
+message UdpSetupRequest {}
+message UdpSetupResponse {
+  uint32 source_port = 1;
+  bytes aes_key = 2;
+}
+message UdpSetupFinishRequest { bool ping_received = 1; }
+message UdpSetupFinishRespone { bool ping_received = 1; }
 
 message GetHelloUpdatesRequest {}
 
